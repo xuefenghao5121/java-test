@@ -1,19 +1,22 @@
-# Build outputs
-build/
-*.class
-
-# Native libraries
+# 编译产物
+*.o
 *.so
-*.a
+*.dylib
+*.dll
+*.exe
+bench_*
 
 # IDE
 .idea/
 *.iml
 .vscode/
-.settings/
-.project
-.classpath
-
-# OS
 .DS_Store
-Thumbs.db
+
+# Java
+*.class
+target/
+
+# 临时文件
+*.tmp
+*.bak
+*~
