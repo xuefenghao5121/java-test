@@ -47,7 +47,7 @@ public final class FastBigDecimal {
             //                int32_t target_scale, int32_t rounding,
             //                int64_t* out_sig, int32_t* out_scale)
             divideH = linker.downcallHandle(
-                lookup.findOrThrow("km_divide"),
+                lookup.find("km_divide").orElseThrow(),
                 FunctionDescriptor.ofVoid(
                     ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT,
                     ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT,
@@ -59,7 +59,7 @@ public final class FastBigDecimal {
             // void km_multiply(int64_t sig1, int32_t scale1, int64_t sig2, int32_t scale2,
             //                  int64_t* out_sig, int32_t* out_scale)
             multiplyH = linker.downcallHandle(
-                lookup.findOrThrow("km_multiply"),
+                lookup.find("km_multiply").orElseThrow(),
                 FunctionDescriptor.ofVoid(
                     ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT,
                     ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT,
@@ -70,7 +70,7 @@ public final class FastBigDecimal {
             // void km_setscale(int64_t sig, int32_t scale, int32_t new_scale, int32_t rounding,
             //                   int64_t* out_sig, int32_t* out_scale)
             setScaleH = linker.downcallHandle(
-                lookup.findOrThrow("km_setscale"),
+                lookup.find("km_setscale").orElseThrow(),
                 FunctionDescriptor.ofVoid(
                     ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT,
                     ValueLayout.JAVA_INT, ValueLayout.JAVA_INT,

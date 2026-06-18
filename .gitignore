@@ -1,0 +1,19 @@
+# Build outputs
+build/
+*.class
+
+# Native libraries
+*.so
+*.a
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+
+# OS
+.DS_Store
+Thumbs.db
