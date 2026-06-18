@@ -123,18 +123,20 @@ uint64_t km_divide_encoded(int64_t sig1, int32_t scale1,
 
     // BigDecimal 除法逻辑：
     // value1 / value2 = (sig1 / sig2) * 10^(-(scale1 - scale2))
-    //
-    // 例如：100 / 3 = 33.333... (scale=0)
-    //       要得到 scale=2: 3333 / 100 = 33.33
+    int32_t result_scale = scale1 - scale2;
 
     // 先计算原始除法
     int64_t quotient = sig1 / sig2;
     int64_t remainder = sig1 % sig2;
-    int32_t result_scale = scale1 - scale2;
 
     // 调整到目标 scale
     // 如果需要增加小数位数，需要乘以 10
-    while (result_scale < target_scale) {
+    // 多算一位用于精确舍入
+    while (result_scale < target_scale + 1) {
+        // 检查溢出
+        if (quotient > INT64_MAX / 10 || (quotient < 0 && quotient < INT64_MIN / 10)) break;
+        if (remainder > INT64_MAX / 10) break;
+
         quotient = quotient * 10;
         remainder = remainder * 10;
         int64_t add = remainder / sig2;
@@ -143,9 +145,23 @@ uint64_t km_divide_encoded(int64_t sig1, int32_t scale1,
         result_scale++;
     }
 
-    // 如果需要减少小数位数，需要舍入
+    // 如果需要减少小数位数（因为我们多算了一位），需要舍入
     if (result_scale > target_scale) {
-        quotient = apply_rounding(quotient, result_scale, target_scale, rounding);
+        // 使用最后一位的余数进行 HALF_UP 舍入
+        // 如果余数 >= 除数/2，则进位
+        if (rounding == 4) {  // HALF_UP
+            if (remainder >= (sig2 + 1) / 2) {  // (sig2 + 1) / 2 等价于 ceil(sig2 / 2)
+                quotient++;
+            }
+        }
+        // 去掉最后一位（需要正确处理四舍五入）
+        // 例如：15647 / 10 应该是 1565，但整数除法得到 1564
+        // 解决：检查去掉的数字，如果 >= 5，则进位
+        int64_t last_digit = quotient % 10;
+        quotient /= 10;
+        if (last_digit >= 5) {
+            quotient++;
+        }
         result_scale = target_scale;
     }
 
@@ -179,12 +195,17 @@ void km_divide_ptr(int64_t sig1, int32_t scale1,
         return;
     }
 
-    // 同样的逻辑
+    // 使用与编码版本相同的逻辑
     int64_t quotient = sig1 / sig2;
     int64_t remainder = sig1 % sig2;
     int32_t result_scale = scale1 - scale2;
 
-    while (result_scale < target_scale) {
+    // 多算一位用于精确舍入
+    while (result_scale < target_scale + 1) {
+        // 检查溢出
+        if (quotient > INT64_MAX / 10 || (quotient < 0 && quotient < INT64_MIN / 10)) break;
+        if (remainder > INT64_MAX / 10) break;
+
         quotient = quotient * 10;
         remainder = remainder * 10;
         int64_t add = remainder / sig2;
@@ -193,8 +214,20 @@ void km_divide_ptr(int64_t sig1, int32_t scale1,
         result_scale++;
     }
 
+    // 如果需要减少小数位数（因为我们多算了一位），需要舍入
     if (result_scale > target_scale) {
-        quotient = apply_rounding(quotient, result_scale, target_scale, rounding);
+        // 使用最后一位的余数进行 HALF_UP 舍入
+        if (rounding == 4) {  // HALF_UP
+            if (remainder >= (sig2 + 1) / 2) {
+                quotient++;
+            }
+        }
+        // 去掉最后一位（需要正确处理四舍五入）
+        int64_t last_digit = quotient % 10;
+        quotient /= 10;
+        if (last_digit >= 5) {
+            quotient++;
+        }
         result_scale = target_scale;
     }
 
