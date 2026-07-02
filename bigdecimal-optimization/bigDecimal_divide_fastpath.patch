@@ -1,0 +1,116 @@
+diff --git a/src/java.base/share/classes/java/math/BigDecimal.java b/src/java.base/share/classes/java/math/BigDecimal.java
+index 3cfe18e84..273eb6935 100644
+--- a/src/java.base/share/classes/java/math/BigDecimal.java
++++ b/src/java.base/share/classes/java/math/BigDecimal.java
+@@ -5819,6 +5819,49 @@ private static boolean unsignedLongCompareEq(long one, long two) {
+         return (one+Long.MIN_VALUE) >= (two+Long.MIN_VALUE);
+     }
+ 
++    /**
++     * Fast check if both operands are "small values" in financial scenarios.
++     * For values where |x| < 10^9 and |y| < 10^9, the product |x*y| < 10^18,
++     * which is guaranteed to fit in a long without overflow check overhead.
++     * This optimization targets financial trading where values typically
++     * have ≤10 digits of precision.
++     *
++     * @param x first operand
++     * @param y second operand
++     * @return true if product is guaranteed to fit in long without overflow check
++     */
++    private static boolean isSmallMultiply(long x, long y) {
++        // 10^9 * 10^9 = 10^18 < 2^63 (9.22 × 10^18)
++        // Use conservative threshold to ensure product stays in long range
++        return Math.abs(x) < 1_000_000_000L && Math.abs(y) < 1_000_000_000L;
++    }
++
++    /**
++     * Fast check if divisor is a "small value" (2-5 digits) that can be
++     * optimized for division operations. This targets common financial
++     * scenarios where division by fixed small values is frequent:
++     * - Divide by 100 (percentage calculation)
++     * - Divide by 1000 (per-thousand calculations)
++     * - Divide by commission rates (typically 2-5 digits)
++     *
++     * @param divisor the divisor to check
++     * @return true if divisor is small (|divisor| < 100000)
++     */
++    private static boolean isSmallDivisor(long divisor) {
++        return divisor != 0 && Math.abs(divisor) < 100_000L;
++    }
++
++    /**
++     * Check if both dividend and divisor are within fast path range for division.
++     * This allows using simpler long arithmetic without BigInteger conversion.
++     *
++     * @param dividend the dividend
++     * @param divisor the divisor
++     * @return true if both values are suitable for fast division
++     */
++    private static boolean canUseFastDivide(long dividend, long divisor) {
++        return divisor != 0 && Math.abs(divisor) < 100_000L && Math.abs(dividend) < 10_000_000_000_000_000L;
++    }
+ 
+     // Compare Normalize dividend & divisor so that both fall into [0.1, 0.999...]
+     private static int compareMagnitudeNormalized(long xs, int xscale, long ys, int yscale) {
+@@ -5872,6 +5915,12 @@ private static long multiply(long x, long y){
+     }
+ 
+     private static BigDecimal multiply(long x, long y, int scale) {
++        // Fast path for small financial values (≤9 digits each)
++        // Product is guaranteed to fit in long, skip overflow check
++        if (isSmallMultiply(x, y)) {
++            return valueOf(x * y, scale);
++        }
++        // Standard path with overflow detection
+         long product = multiply(x, y);
+         if(product!=INFLATED) {
+             return valueOf(product,scale);
+@@ -5894,6 +5943,15 @@ private static BigDecimal multiply(BigInteger x, BigInteger y, int scale) {
+      * Multiplies two long values and rounds according {@code MathContext}
+      */
+     private static BigDecimal multiplyAndRound(long x, long y, int scale, MathContext mc) {
++        // Fast path for small financial values with unlimited precision
++        if (mc.precision == 0 && isSmallMultiply(x, y)) {
++            return valueOf(x * y, scale);
++        }
++        // Fast path for small financial values - skip overflow check
++        if (isSmallMultiply(x, y)) {
++            return doRound(x * y, scale, mc);
++        }
++        // Standard path with overflow detection
+         long product = multiply(x, y);
+         if(product!=INFLATED) {
+             return doRound(product, scale, mc);
+@@ -6019,6 +6077,32 @@ private static boolean longLongCompareMagnitude(long hi0, long lo0, long hi1, lo
+     }
+ 
+     private static BigDecimal divide(long dividend, int dividendScale, long divisor, int divisorScale, int scale, int roundingMode) {
++        // Fast path for small divisors (2-5 digits) in financial scenarios
++        // This handles common cases like: divide by 100 (percentages), 1000, etc.
++        if (canUseFastDivide(dividend, divisor)) {
++            // For small divisors, we can skip most of the scale adjustment logic
++            // and directly use the core divideAndRound with long arithmetic
++            int qsign = ((dividend < 0) == (divisor < 0)) ? 1 : -1;
++            long absDividend = Math.abs(dividend);
++            long absDivisor = Math.abs(divisor);
++
++            // Simple scale adjustment for fast path
++            // If both scales are equal and result scale is reasonable, use direct division
++            if (dividendScale == divisorScale) {
++                long q = absDividend / absDivisor;
++                if (roundingMode == ROUND_DOWN) {
++                    return valueOf(q * qsign, scale);
++                }
++                long r = absDividend % absDivisor;
++                if (r != 0) {
++                    boolean increment = needIncrement(absDivisor, roundingMode, qsign, q, r);
++                    return valueOf((increment ? q + qsign : q) * qsign, scale);
++                }
++                return valueOf(q * qsign, scale);
++            }
++        }
++
++        // Standard path for general case
+         if (checkScale(dividend,(long)scale + divisorScale) > dividendScale) {
+             int newScale = scale + divisorScale;
+             int raise = newScale - dividendScale;
