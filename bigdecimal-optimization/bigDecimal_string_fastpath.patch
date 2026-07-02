@@ -1,0 +1,128 @@
+diff --git a/src/java.base/share/classes/java/math/BigDecimal.java b/src/java.base/share/classes/java/math/BigDecimal.java
+index 3cfe18e84..76dbf2aa8 100644
+--- a/src/java.base/share/classes/java/math/BigDecimal.java
++++ b/src/java.base/share/classes/java/math/BigDecimal.java
+@@ -514,6 +514,90 @@ public BigDecimal(char[] in, int offset, int len) {
+     }
+
+     /**
++     * Fast check if char array matches financial format pattern:
++     * - Optional sign (+/-)
++     * - 1-12 digits (integer part)
++     * - Optional decimal point
++     * - If decimal present, exactly 2 digits (currency) or up to 4 digits (percentage)
++     *
++     * This optimization targets common financial string representations
++     * like "123.45", "-1234.56", "+1000.00", etc.
++     *
++     * @param in the input char array
++     * @param offset starting offset
++     * @param len length of input
++     * @return scale value if matches financial pattern, -1 otherwise
++     */
++    private static int checkFinancialFastPath(char[] in, int offset, int len) {
++        if (len < 1 || len > 18) return -1; // Quick reject: too short or too long
++
++        int pos = offset;
++        int end = offset + len;
++
++        // Check for optional sign
++        if (in[pos] == '+' || in[pos] == '-') {
++            pos++;
++            if (pos >= end) return -1; // Only sign, no digits
++        }
++
++        int digitCount = 0;
++        int decimalPos = -1;
++
++        // Scan digits and decimal point
++        for (; pos < end; pos++) {
++            char c = in[pos];
++            if (c >= '0' && c <= '9') {
++                digitCount++;
++                if (digitCount > 12) return -1; // Too many digits for fast path
++            } else if (c == '.') {
++                if (decimalPos != -1) return -1; // Multiple decimals
++                decimalPos = digitCount;
++            } else {
++                return -1; // Invalid character
++            }
++        }
++
++        if (digitCount == 0) return -1; // No digits
++
++        // Determine scale
++        if (decimalPos == -1) {
++            return 0; // No decimal point, scale = 0
++        }
++
++        int fractionDigits = digitCount - decimalPos;
++        // Fast path for common currency (2 digits) or percentage (up to 4 digits)
++        if (fractionDigits == 2) {
++            return 2;
++        } else if (fractionDigits == 4) {
++            return 4;
++        }
++
++        return -1;
++    }
++
++    /**
++     * Fast path parsing for financial format strings.
++     * Precondition: checkFinancialFastPath returned valid scale.
++     *
++     * @param in the input char array
++     * @param offset starting offset
++     * @param len length of input
++     * @param scale the scale determined by checkFinancialFastPath
++     * @return BigDecimal parsed from input
++     */
++    private static BigDecimal parseFinancialFastPath(char[] in, int offset, int len, int scale, MathContext mc) {
++        int pos = offset;
++        int end = offset + len;
++        boolean isneg = false;
++
++        // Handle sign
++        if (in[pos] == '+' || in[pos] == '-') {
++            isneg = (in[pos] == '-');
++            pos++;
++        }
++
++        // Parse digits (ignoring decimal point)
++        long value = 0;
++        for (; pos < end; pos++) {
++            char c = in[pos];
++            if (c >= '0' && c <= '9') {
++                value = value * 10 + (c - '0');
++            }
++            // Skip decimal point
++        }
++
++        if (isneg) value = -value;
++
++        BigDecimal result = valueOf(value, scale);
++        return mc.precision == 0 ? result : result.round(mc);
++    }
++
++    /**
+      * Translates a character array representation of a
+      * {@code BigDecimal} into a {@code BigDecimal}, accepting the
+      * the same sequence of characters as the {@link #BigDecimal(String)}
+@@ -553,6 +637,13 @@ public BigDecimal(char[] in, int offset, int len, MathContext mc) {
+         if (in[offset] == '+') { // leading + allowed
+             offset++;
+             len--;
++        }
++
++        // Fast path for financial format strings
++        int fastScale = checkFinancialFastPath(in, offset, len);
++        if (fastScale != -1) {
++            this.inflated = parseFinancialFastPath(in, offset, len, fastScale, mc);
++            this.intCompact = inflated.intCompact;
++            this.scale = inflated.scale;
++            this.intVal = inflated.intVal;
++            this.precision = inflated.precision;
++            return;
+         }
+
+         // should now be at numeric part of the significand
