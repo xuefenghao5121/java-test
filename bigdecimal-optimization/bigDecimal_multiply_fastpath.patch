@@ -1,0 +1,56 @@
+diff --git a/src/java.base/share/classes/java/math/BigDecimal.java b/src/java.base/share/classes/java/math/BigDecimal.java
+index 3cfe18e84..0d9525c9d 100644
+--- a/src/java.base/share/classes/java/math/BigDecimal.java
++++ b/src/java.base/share/classes/java/math/BigDecimal.java
+@@ -5819,6 +5819,22 @@ private static boolean unsignedLongCompareEq(long one, long two) {
+         return (one+Long.MIN_VALUE) >= (two+Long.MIN_VALUE);
+     }
+ 
++    /**
++     * Fast check if both operands are "small values" in financial scenarios.
++     * For values where |x| < 10^9 and |y| < 10^9, the product |x*y| < 10^18,
++     * which is guaranteed to fit in a long without overflow check overhead.
++     * This optimization targets financial trading where values typically
++     * have ≤10 digits of precision.
++     *
++     * @param x first operand
++     * @param y second operand
++     * @return true if product is guaranteed to fit in long without overflow check
++     */
++    private static boolean isSmallMultiply(long x, long y) {
++        // 10^9 * 10^9 = 10^18 < 2^63 (9.22 × 10^18)
++        // Use conservative threshold to ensure product stays in long range
++        return Math.abs(x) < 1_000_000_000L && Math.abs(y) < 1_000_000_000L;
++    }
+ 
+     // Compare Normalize dividend & divisor so that both fall into [0.1, 0.999...]
+     private static int compareMagnitudeNormalized(long xs, int xscale, long ys, int yscale) {
+@@ -5872,6 +5888,12 @@ private static long multiply(long x, long y){
+     }
+ 
+     private static BigDecimal multiply(long x, long y, int scale) {
++        // Fast path for small financial values (≤9 digits each)
++        // Product is guaranteed to fit in long, skip overflow check
++        if (isSmallMultiply(x, y)) {
++            return valueOf(x * y, scale);
++        }
++        // Standard path with overflow detection
+         long product = multiply(x, y);
+         if(product!=INFLATED) {
+             return valueOf(product,scale);
+@@ -5894,6 +5916,15 @@ private static BigDecimal multiply(BigInteger x, BigInteger y, int scale) {
+      * Multiplies two long values and rounds according {@code MathContext}
+      */
+     private static BigDecimal multiplyAndRound(long x, long y, int scale, MathContext mc) {
++        // Fast path for small financial values with unlimited precision
++        if (mc.precision == 0 && isSmallMultiply(x, y)) {
++            return valueOf(x * y, scale);
++        }
++        // Fast path for small financial values - skip overflow check
++        if (isSmallMultiply(x, y)) {
++            return doRound(x * y, scale, mc);
++        }
++        // Standard path with overflow detection
+         long product = multiply(x, y);
+         if(product!=INFLATED) {
+             return doRound(product, scale, mc);
