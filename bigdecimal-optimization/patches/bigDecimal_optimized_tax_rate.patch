@@ -1,0 +1,81 @@
+--- a/src/java.base/share/classes/java/math/BigDecimal.java
++++ b/src/java.base/share/classes/java/math/BigDecimal.java
+@@ -1454,7 +1454,7 @@ public class BigDecimal extends Number implements Comparable<BigDecimal> {
+         }
+         // Fast path for small multipliers
+         // Optimization for tax rate calculations: price × taxRate
+-        if (isSmallMultiply(longMultiplicand, longMultiplier)) {
++        if (isSmallMultiplyOptimized(longMultiplicand, longMultiplier)) {
+             return BigDecimal.valueOf(longMultiplicand * longMultiplier);
+         }
+         return new BigDecimal(BigInteger.valueOf(longMultiplicand).multiply(
+@@ -2541,7 +2541,7 @@ public class BigDecimal extends Number implements Comparable<BigDecimal> {
+
+         // Handle the case where divisor is a power of 10
+         if (isPowerOfTen(longDivisor)) {
+-            return divideByPowerOfTen(longMultiplicand, longDivisor, preferredScale, this);
++            return divideByPowerOfTenOptimized(longMultiplicand, longDivisor, preferredScale, this);
+         }
+
+         // Check if we can use fast path for long division with scale adjustment
+@@ -2551,7 +2551,7 @@ public class BigDecimal extends Number implements Comparable<BigDecimal> {
+         int scaleDiff = this.scale - divisor.scale;
+         if (canUseFastDivideWithScale(longMultiplicand, longDivisor, scaleDiff)) {
+             // Use optimized long division with scale adjustment
+-            long adjustedDividend = adjustForScale(longMultiplicand, scaleDiff);
++            long adjustedDividend = adjustForScaleOptimized(longMultiplicand, scaleDiff);
+             long result = adjustedDividend / longDivisor;
+             int newScale = divisor.scale + scaleDiff;
+             return BigDecimal.valueOf(result, newScale);
+@@ -2634,6 +2634,48 @@ public class BigDecimal extends Number implements Comparable<BigDecimal> {
+         return false;
+     }
+
++    /**
++     * Optimized check for multiplication that supports long-tail distributions.
++     * Adds support for large amounts × small tax rates (e.g., $100M × 0.08).
++     *
++     * @param x the first multiplier
++     * @param y the second multiplier
++     * @return true if fast path can be used
++     */
++    private static boolean isSmallMultiplyOptimized(long x, long y) {
++        long absX = Math.abs(x);
++        long absY = Math.abs(y);
++
++        // Fast path 1: both numbers small (< 10^9)
++        if (absX < 1_000_000_000L && absY < 1_000_000_000L) {
++            return true;
++        }
++
++        // Fast path 2: one very small (tax rate < 1000), other can be up to 10^13
++        // Supports large transaction × tax rate scenario
++        if (absX < 1_000L && absY < 10_000_000_000_000L) {
++            return true;
++        }
++        if (absY < 1_000L && absX < 10_000_000_000_000L) {
++            return true;
++        }
++
++        return false;
++    }
++
++    /**
++     * Check if fast divide can be used with small scale differences.
++     * Enables optimization for tax calculations like price ÷ (1 + taxRate).
++     *
++     * @param dividend the dividend
++     * @param divisor the divisor
++     * @param scaleDiff the difference in scales
++     * @return true if fast divide with scale adjustment can be used
++     */
++    private static boolean canUseFastDivideWithScale(long dividend, long divisor, int scaleDiff) {
++        return divisor != 0 &&
++               Math.abs(divisor) < 100_000L &&
++               Math.abs(dividend) < 10_000_000_000_000_000L &&
++               Math.abs(scaleDiff) <= 4;  // Allow small scale differences
++    }
++
+     /**
+      * Returns the compact value for this {@code BigDecimal}, if possible.
+      *
