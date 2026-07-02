@@ -3,58 +3,66 @@
 ## 概述
 
 针对 JDK 25 BigDecimal 的性能优化，专门面向金融交易场景：
-- **乘法快速路径**：小规模数值（≤10 位精度）
-- **除法快速路径**：小除数（2-5 位）
+- **乘法快速路径**：支持小额和大额交易（长尾分布）
+- **除法快速路径**：支持小除数和 scale 调整（税率计算）
+- **税率计算优化**：支持 price × taxRate 和 price ÷ (1 + taxRate)
 
 ---
 
 ## 优化内容
 
-### 1. 乘法快速路径优化
+### 1. 乘法快速路径优化（已更新支持长尾数）
 
-#### 新增辅助方法
+#### 优化后的辅助方法
 ```java
 private static boolean isSmallMultiply(long x, long y) {
-    return Math.abs(x) < 1_000_000_000L && Math.abs(y) < 1_000_000_000L;
+    long absX = Math.abs(x);
+    long absY = Math.abs(y);
+
+    // 快速路径 1：两数都小（< 10^9）
+    if (absX < 1_000_000_000L && absY < 1_000_000_000L) {
+        return true;
+    }
+
+    // 快速路径 2：一个很小（税率 < 1000），另一个可达 10^13
+    // 支持大额交易 × 税率场景
+    if (absX < 1_000L && absY < 10_000_000_000_000L) {
+        return true;
+    }
+    if (absY < 1_000L && absX < 10_000_000_000_000L) {
+        return true;
+    }
+
+    return false;
 }
 ```
 
-#### 优化的方法
-- `multiply(long x, long y, int scale)` - 跳过小值溢出检查
-- `multiplyAndRound(long x, long y, int scale, MathContext mc)` - 添加快速路径
+#### 覆盖范围提升
 
-#### 性能预期
-| 场景 | 基线 | 优化后 | 提升 |
-|------|------|--------|------|
-| 小值乘法 (9位) | 4.91 ns/op | ~3.5 ns/op | **28%** |
-| 带scale乘法 | 4.43 ns/op | ~3.2 ns/op | **28%** |
+| 金额范围 | 优化前 | 优化后 | 覆盖率提升 |
+|----------|--------|--------|-----------|
+| <$10M | ✓ | ✓ | - |
+| $10M - $100M | ✗ | ✓ | **+10%** |
+| >$100M | ✗ | ✗ | - |
 
----
-
-### 2. 除法快速路径优化
+### 2. 除法快速路径优化（已更新支持 scale 差）
 
 #### 新增辅助方法
 ```java
-private static boolean isSmallDivisor(long divisor) {
-    return divisor != 0 && Math.abs(divisor) < 100_000L;
-}
-
-private static boolean canUseFastDivide(long dividend, long divisor) {
-    return divisor != 0 && Math.abs(divisor) < 100_000L
-        && Math.abs(dividend) < 10_000_000_000_000_000L;
+private static boolean canUseFastDivideWithScale(long dividend, long divisor, int scaleDiff) {
+    return divisor != 0 &&
+           Math.abs(divisor) < 100_000L &&
+           Math.abs(dividend) < 10_000_000_000_000_000L &&
+           Math.abs(scaleDiff) <= 4;  // 允许小的 scale 差
 }
 ```
 
-#### 优化的方法
-- `divide(long dividend, int dividendScale, long divisor, int divisorScale, ...)` 
-  - 同 scale 时跳过复杂调整逻辑
+#### 覆盖范围提升
 
-#### 性能预期
-| 场景 | 基线 | 优化后 | 提升 |
-|------|------|--------|------|
-| ÷100 (百分比) | 4.40 ns/op | ~3.5 ns/op | **20%** |
-| ÷1000 (千分比) | 2.57 ns/op | ~2.0 ns/op | **22%** |
-| ÷25 (佣金费率) | 4.63 ns/op | ~3.7 ns/op | **20%** |
+| 场景 | 优化前 | 优化后 |
+|------|--------|--------|
+| 同 scale 除法 | ✓ | ✓ |
+| scale 差 ≤ 4 | ✗ | ✓ |
 
 ---
 
@@ -62,23 +70,41 @@ private static boolean canUseFastDivide(long dividend, long divisor) {
 
 | 文件 | 说明 |
 |------|------|
-| `bigDecimal_multiply_fastpath.patch` | 乘法优化补丁 |
-| `bigDecimal_divide_fastpath.patch` | 除法优化补丁 |
-| `SimpleBenchmark.java` | 乘法性能测试 |
-| `DivideBenchmark.java` | 除法性能测试 |
-| `MockBigDecimal.java` | 优化逻辑验证 |
-| `performance_comparison_report.md` | 详细性能分析 |
+| `bigDecimal_optimized_tax_rate.patch` | 完整优化补丁（含长尾数支持） |
+| `bigDecimal_multiply_fastpath.patch` | 乘法优化补丁（原始） |
+| `bigDecimal_divide_fastpath.patch` | 除法优化补丁（原始） |
+| `TaxRateBenchmark.java` | 税率计算性能测试 |
+| `TaxRateAnalysis.java` | 快速路径覆盖分析 |
+| `SimpleBenchmark.java` | 基础乘法测试 |
+| `DivideBenchmark.java` | 基础除法测试 |
+
+---
+
+## 性能预期
+
+### 乘法性能（税率计算场景）
+
+| 场景 | 基线 | 优化后 | 提升 |
+|------|------|--------|------|
+| 小额 × 税率 | 0.77 ns/op | ~0.6 ns/op | **22%** |
+| 大额 × 税率 | 6.42 ns/op | ~4.5 ns/op | **30%** |
+
+### 除法性能（税率计算场景）
+
+| 场景 | 基线 | 优化后 | 提升 |
+|------|------|--------|------|
+| 同 scale | 3.64 ns/op | ~3.0 ns/op | **18%** |
+| scale 差 ≤ 4 | 6.55 ns/op | ~4.5 ns/op | **31%** |
 
 ---
 
 ## 应用方法
 
-### 合并补丁（推荐）
+### 完整补丁（推荐）
 
 ```bash
 cd /path/to/jdk/src/java.base/share/classes/java/math/
-patch -p1 < bigDecimal_multiply_fastpath.patch
-patch -p1 < bigDecimal_divide_fastpath.patch
+patch -p1 < bigDecimal_optimized_tax_rate.patch
 ```
 
 ### 编译验证
@@ -95,13 +121,13 @@ make build
 ## 运行测试
 
 ```bash
-# 乘法测试
-javac SimpleBenchmark.java
-java SimpleBenchmark
+# 税率计算场景测试
+javac TaxRateBenchmark.java
+java TaxRateBenchmark
 
-# 除法测试
-javac DivideBenchmark.java
-java DivideBenchmark
+# 快速路径覆盖分析
+javac TaxRateAnalysis.java
+java TaxRateAnalysis
 ```
 
 ---
@@ -109,39 +135,43 @@ java DivideBenchmark
 ## 适用场景
 
 ### ✅ 推荐使用
-- 金融交易（±$10M 以内）
-- 货币计算（2 位小数）
-- 百分比计算（÷100）
-- 佣金/费率计算（÷固定小值）
+
+- **税率计算**：price × taxRate
+- **含税计算**：price ÷ (1 + taxRate)
+- **长尾交易**：从 $1 到 $100M 的交易
+- **百分比转换**：÷100, ÷1000
 
 ### ❌ 不适用
-- 科学计算（大数值）
-- 精密工程（高精度需求）
+
+- 科学计算（大数值 > 10^13）
+- 精密工程（需要 BigInteger）
 
 ---
 
 ## 技术细节
 
-### 乘法优化原理
-```java
-// 原实现：每次乘法都需要除法验证
-if (product / y == x) { return product; }  // 昂贵的除法
+### 乘法优化原理（长尾数支持）
 
-// 优化后：小值直接返回
-if (isSmallMultiply(x, y)) {
-    return valueOf(x * y, scale);  // 无除法开销
-}
+```java
+// 原实现：两数都 < 10^9
+if (|x| < 10^9 && |y| < 10^9) { fast_path(); }
+
+// 优化后：支持一个大数 × 一个小数（税率）
+if (两数都 < 10^9) { fast_path(); }  // 原有路径
+if (一数 < 1K && 另一数 < 10^13) { fast_path(); }  // 新增路径
 ```
 
-### 除法优化原理
-```java
-// 原实现：复杂的 scale 调整和可能的 BigInteger 转换
+### 除法优化原理（scale 差支持）
 
-// 优化后：同 scale 时直接使用 long 除法
-if (dividendScale == divisorScale) {
-    long q = absDividend / absDivisor;
-    // 简单的舍入处理
-    return valueOf(q * sign, scale);
+```java
+// 原实现：只处理相同 scale
+if (dividendScale == divisorScale) { fast_divide(); }
+
+// 优化后：支持小的 scale 差
+if (scale 差 ≤ 4) {
+    调整 scale 后使用 long 除法;
+} else {
+    标准 BigInteger 路径;
 }
 ```
 

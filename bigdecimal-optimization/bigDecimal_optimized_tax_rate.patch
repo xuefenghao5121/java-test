@@ -1,0 +1,189 @@
+diff --git a/src/java.base/share/classes/java/math/BigDecimal.java b/src/java.base/share/classes/java/math/BigDecimal.java
+index 3cfe18e84..76dbf2aa8 100644
+--- a/src/java.base/share/classes/java/math/BigDecimal.java
++++ b/src/java.base/share/classes/java/math/BigDecimal.java
+@@ -5819,6 +5819,89 @@ private static boolean unsignedLongCompareEq(long one, long two) {
+         return (one+Long.MIN_VALUE) >= (two+Long.MIN_VALUE);
+     }
+ 
++    /**
++     * Fast check if both operands are "small values" in financial scenarios.
++     * For values where |x| < 10^9 and |y| < 10^9, the product |x*y| < 10^18,
++     * which is guaranteed to fit in a long without overflow check overhead.
++     * This optimization targets financial trading where values typically
++     * have ≤10 digits of precision.
++     *
++     * Also supports the "one small, one large" pattern common in tax rate
++     * calculations where one operand is a small rate (e.g., 0.13 = 13/100)
++     * and the other is a large amount.
++     *
++     * @param x first operand
++     * @param y second operand
++     * @return true if product is guaranteed to fit in long without overflow check
++     */
++    private static boolean isSmallMultiply(long x, long y) {
++        long absX = Math.abs(x);
++        long absY = Math.abs(y);
++
++        // Fast path 1: Both operands are small (< 10^9)
++        if (absX < 1_000_000_000L && absY < 1_000_000_000L) {
++            return true;
++        }
++
++        // Fast path 2: One operand is very small (rate-like < 1000),
++        // the other can be larger (< 10^13) as product stays within range.
++        // This handles tax rate calculations: amount × 0.13 = (amount × 13) / 100
++        if (absX < 1_000L && absY < 10_000_000_000_000L) {
++            return true;
++        }
++        if (absY < 1_000L && absX < 10_000_000_000_000L) {
++            return true;
++        }
++
++        return false;
++    }
++
++    /**
++     * Fast check if divisor is a "small value" (2-5 digits) that can be
++     * optimized for division operations. This targets common financial
++     * scenarios where division by fixed small values is frequent:
++     * - Divide by 100 (percentage calculation)
++     * - Divide by 1000 (per-thousand calculations)
++     * - Divide by commission rates (typically 2-5 digits)
++     *
++     * @param divisor the divisor to check
++     * @return true if divisor is small (|divisor| < 100000)
++     */
++    private static boolean isSmallDivisor(long divisor) {
++        return divisor != 0 && Math.abs(divisor) < 100_000L;
++    }
++
++    /**
++     * Check if both dividend and divisor are within fast path range for division.
++     * This allows using simpler long arithmetic without BigInteger conversion.
++     *
++     * @param dividend the dividend
++     * @param divisor the divisor
++     * @return true if both values are suitable for fast division
++     */
++    private static boolean canUseFastDivide(long dividend, long divisor) {
++        return divisor != 0 && Math.abs(divisor) < 100_000L && Math.abs(dividend) < 10_000_000_000_000_000L;
++    }
++
++    /**
++     * Check if division can use fast path with scale difference.
++     * This handles common tax rate calculation scenarios where scale
++     * difference is small (typically ≤ 4).
++     *
++     * @param dividend the dividend
++     * @param divisor the divisor
++     * @param scaleDiff the difference between dividend scale and divisor scale
++     * @return true if fast path can be used
++     */
++    private static boolean canUseFastDivideWithScale(long dividend, long divisor, int scaleDiff) {
++        if (divisor == 0) return false;
++        long absDivisor = Math.abs(divisor);
++        long absDividend = Math.abs(dividend);
++        int absScaleDiff = Math.abs(scaleDiff);
++
++        // Small divisor with reasonable dividend and small scale difference
++        return absDivisor < 100_000L && absDividend < 10_000_000_000_000_000L && absScaleDiff <= 4;
++    }
+ 
+     // Compare Normalize dividend & divisor so that both fall into [0.1, 0.999...]
+     private static int compareMagnitudeNormalized(long xs, int xscale, long ys, int yscale) {
+@@ -5872,6 +5955,12 @@ private static long multiply(long x, long y){
+     }
+ 
+     private static BigDecimal multiply(long x, long y, int scale) {
++        // Fast path for small financial values (≤9 digits each)
++        // Product is guaranteed to fit in long, skip overflow check
++        if (isSmallMultiply(x, y)) {
++            return valueOf(x * y, scale);
++        }
++        // Standard path with overflow detection
+         long product = multiply(x, y);
+         if(product!=INFLATED) {
+             return valueOf(product,scale);
+@@ -5894,6 +5983,15 @@ private static BigDecimal multiply(BigInteger x, BigInteger y, int scale) {
+      * Multiplies two long values and rounds according {@code MathContext}
+      */
+     private static BigDecimal multiplyAndRound(long x, long y, int scale, MathContext mc) {
++        // Fast path for small financial values with unlimited precision
++        if (mc.precision == 0 && isSmallMultiply(x, y)) {
++            return valueOf(x * y, scale);
++        }
++        // Fast path for small financial values - skip overflow check
++        if (isSmallMultiply(x, y)) {
++            return doRound(x * y, scale, mc);
++        }
++        // Standard path with overflow detection
+         long product = multiply(x, y);
+         if(product!=INFLATED) {
+             return doRound(product, scale, mc);
+@@ -6019,6 +6117,65 @@ private static boolean longLongCompareMagnitude(long hi0, long lo0, long hi1, lo
+     }
+ 
+     private static BigDecimal divide(long dividend, int dividendScale, long divisor, int divisorScale, int scale, int roundingMode) {
++        // Fast path for small divisors (2-5 digits) in financial scenarios
++        // This handles common cases like: divide by 100 (percentages), 1000, etc.
++        int scaleDiff = dividendScale - divisorScale;
++
++        if (canUseFastDivideWithScale(dividend, divisor, scaleDiff)) {
++            int qsign = ((dividend < 0) == (divisor < 0)) ? 1 : -1;
++            long absDividend = Math.abs(dividend);
++            long absDivisor = Math.abs(divisor);
++
++            // Case 1: Same scale - use direct division
++            if (scaleDiff == 0) {
++                long q = absDividend / absDivisor;
++                if (roundingMode == ROUND_DOWN) {
++                    return valueOf(q * qsign, scale);
++                }
++                long r = absDividend % absDivisor;
++                if (r != 0) {
++                    boolean increment = needIncrement(absDivisor, roundingMode, qsign, q, r);
++                    return valueOf((increment ? q + qsign : q) * qsign, scale);
++                }
++                return valueOf(q * qsign, scale);
++            }
++
++            // Case 2: Small scale difference (≤4) - adjust and divide
++            // This handles tax rate calculations where scales often differ slightly
++            if (scaleDiff > 0) {
++                // dividend needs scaling down (multiply by 10^scaleDiff)
++                long scaledDividend = longMultiplyPowerTen(absDividend, scaleDiff);
++                if (scaledDividend != INFLATED) {
++                    long q = scaledDividend / absDivisor;
++                    if (roundingMode == ROUND_DOWN) {
++                        return valueOf(q * qsign, scale);
++                    }
++                    long r = scaledDividend % absDivisor;
++                    if (r != 0) {
++                        boolean increment = needIncrement(absDivisor, roundingMode, qsign, q, r);
++                        return valueOf((increment ? q + qsign : q) * qsign, scale);
++                    }
++                    return valueOf(q * qsign, scale);
++                }
++            } else {
++                // divisor needs scaling (multiply by 10^(-scaleDiff))
++                long scaledDivisor = longMultiplyPowerTen(absDivisor, -scaleDiff);
++                if (scaledDivisor != INFLATED) {
++                    long q = absDividend / scaledDivisor;
++                    if (roundingMode == ROUND_DOWN) {
++                        return valueOf(q * qsign, scale);
++                    }
++                    long r = absDividend % scaledDivisor;
++                    if (r != 0) {
++                        boolean increment = needIncrement(scaledDivisor, roundingMode, qsign, q, r);
++                        return valueOf((increment ? q + qsign : q) * qsign, scale);
++                    }
++                    return valueOf(q * qsign, scale);
++                }
++            }
++        }
++
++        // Standard path for general case
+         if (checkScale(dividend,(long)scale + divisorScale) > dividendScale) {
+             int newScale = scale + divisorScale;
+             int raise = newScale - dividendScale;
