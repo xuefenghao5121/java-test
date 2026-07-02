@@ -1,0 +1,90 @@
+diff --git a/src/java.base/share/classes/java/math/BigDecimal.java b/src/java.base/share/classes/java/math/BigDecimal.java
+index 3cfe18e84..76dbf2aa8 100644
+--- a/src/java.base/share/classes/java/math/BigDecimal.java
++++ b/src/java.base/share/classes/java/math/BigDecimal.java
+@@ -6117,65 +6117,56 @@ private static boolean longLongCompareMagnitude(long hi0, long lo0, long hi1, lo
+     }
+
+     private static BigDecimal divide(long dividend, int dividendScale, long divisor, int divisorScale, int scale, int roundingMode) {
+-        // Fast path for small divisors (2-5 digits) in financial scenarios
+-        // This handles common cases like: divide by 100 (percentages), 1000, etc.
++        // Fast path for small divisors in financial scenarios
++        // Only applies when scales are equal to avoid complex scale adjustments
+         int scaleDiff = dividendScale - divisorScale;
+
+-        if (canUseFastDivideWithScale(dividend, divisor, scaleDiff)) {
+-            int qsign = ((dividend < 0) == (divisor < 0)) ? 1 : -1;
+-            long absDividend = Math.abs(dividend);
+-            long absDivisor = Math.abs(divisor);
+-
+-            // Case 1: Same scale - use direct division
+-            if (scaleDiff == 0) {
+-                long q = absDividend / absDivisor;
+-                if (roundingMode == ROUND_DOWN) {
+-                    return valueOf(q * qsign, scale);
+-                }
+-                long r = absDividend % absDivisor;
+-                if (r != 0) {
+-                    boolean increment = needIncrement(absDivisor, roundingMode, qsign, q, r);
+-                    return valueOf((increment ? q + qsign : q) * qsign, scale);
+-                }
+-                return valueOf(q * qsign, scale);
+-            }
+-
+-            // Case 2: Small scale difference (≤4) - adjust and divide
+-            // This handles tax rate calculations where scales often differ slightly
+-            if (scaleDiff > 0) {
+-                // dividend needs scaling down (multiply by 10^scaleDiff)
+-                long scaledDividend = longMultiplyPowerTen(absDividend, scaleDiff);
+-                if (scaledDividend != INFLATED) {
+-                    long q = scaledDividend / absDivisor;
+-                    if (roundingMode == ROUND_DOWN) {
+-                        return valueOf(q * qsign, scale);
+-                    }
+-                    long r = scaledDividend % absDivisor;
+-                    if (r != 0) {
+-                        boolean increment = needIncrement(absDivisor, roundingMode, qsign, q, r);
+-                        return valueOf((increment ? q + qsign : q) * qsign, scale);
+-                    }
+-                    return valueOf(q * qsign, scale);
+-                }
+-            } else {
+-                // divisor needs scaling (multiply by 10^(-scaleDiff))
+-                long scaledDivisor = longMultiplyPowerTen(absDivisor, -scaleDiff);
+-                if (scaledDivisor != INFLATED) {
+-                    long q = absDividend / scaledDivisor;
+-                    if (roundingMode == ROUND_DOWN) {
+-                        return valueOf(q * qsign, scale);
+-                    }
+-                    long r = absDividend % scaledDivisor;
+-                    if (r != 0) {
+-                        boolean increment = needIncrement(scaledDivisor, roundingMode, qsign, q, r);
+-                        return valueOf((increment ? q + qsign : q) * qsign, scale);
+-                    }
+-                    return valueOf(q * qsign, scale);
+-                }
+-            }
++        // Fast path: only when scales are equal
++        // Avoids complex scale adjustments that can lead to precision issues
++        if (scaleDiff == 0 && canUseFastDivide(dividend, divisor)) {
++            int qsign = ((dividend < 0) == (divisor < 0)) ? 1 : -1;
++            long absDividend = Math.abs(dividend);
++            long absDivisor = Math.abs(divisor);
++            long q = absDividend / absDivisor;
++
++            if (roundingMode == ROUND_DOWN) {
++                return valueOf(q * qsign, scale);
++            }
++
++            long r = absDividend % absDivisor;
++            if (r != 0) {
++                boolean increment = needIncrement(absDivisor, roundingMode, qsign, q, r);
++                return valueOf((increment ? q + qsign : q) * qsign, scale);
++            }
++            return valueOf(q * qsign, scale);
+         }
+
+-        // Standard path for general case
+         if (checkScale(dividend,(long)scale + divisorScale) > dividendScale) {
+             int newScale = scale + divisorScale;
+             int raise = newScale - dividendScale;
